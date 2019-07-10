@@ -423,6 +423,7 @@ static uint16_t nvme_io_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         trace_nvme_err_invalid_ns(nsid, n->num_namespaces);
         return NVME_INVALID_NSID | NVME_DNR;
     }
+    /* fprintf(stderr, "nvme_io_cmd %u\n", cmd->opcode); */
 
     ns = &n->namespaces[nsid - 1];
     switch (cmd->opcode) {
@@ -843,8 +844,126 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
+struct ip_hdr {
+    uint8_t ihl : 4;
+    uint8_t version : 4;
+    uint8_t tos;
+    uint16_t len;
+    uint16_t id;
+    uint16_t frag_offset;
+    uint8_t ttl;
+    uint8_t protocol;
+    uint16_t check;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint8_t data[];
+} __attribute__((packed));
+struct icmp_hdr {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    uint32_t rest;
+} __attribute__((packed));
+uint16_t checksum(void *addr, int count)
+{
+    uint32_t sum = 0;
+    uint16_t * ptr = addr;
+    while (count > 1)  {
+        sum += * ptr++;
+        count -= 2;
+    }
+    if (count > 0)
+        sum += *(uint8_t *)ptr;
+    while (sum >> 16)
+        sum = (sum & 0xffff) + (sum >> 16);
+    return ~sum;
+}
+struct ip_pkt {
+    int len;
+    char data[400];
+};
+static int ip_head = 0, ip_tail = 0;
+static struct ip_pkt ip_buffer[55];
+static void ip_insert(int len, char *data)
+{
+    if ((ip_head + 1) % 55 == ip_tail) {
+        fprintf(stderr, "ip q full\n");
+        return;
+    }
+    if (len >= 400)
+        return;
+
+    ip_buffer[ip_head].len = len;
+    memcpy(ip_buffer[ip_head].data, data, len);
+
+    struct ip_hdr *iphdr = (void *)ip_buffer[ip_head].data;
+    struct icmp_hdr *icmphdr = (void *)iphdr->data;
+    uint32_t addr_buf;
+    if (hdr->version != 4) {
+        fprintf(stderr, "not IPV4\n");
+        return;
+    }
+#define IP_ICMP 0x01
+#define IP_TCP 0x06
+#define IP_UDP 0x11
+    switch (hdr->protocol) {
+    case IP_ICMP:
+        fprintf(stderr, "replying\n");
+        addr_buf = iphdr->saddr;
+        iphdr->saddr = iphdr->daddr;
+        iphdr->daddr = addr_buf;
+
+#define ICMP_REPLY           0x00
+        icmphdr->type = ICMP_REPLY;
+        icmphdr->code = 0;
+        icmphdr->checksum = 0;
+        icmphdr->checksum = checksum(icmphdr, len - 4 * iphdr->ihl);
+        break;
+    case IP_TCP:
+        fprintf(stderr, "TCP not supported\n");
+        return;
+    case IP_UDP:
+        fprintf(stderr, "UDP not supported\n");
+        return;
+    default:
+        fprintf(stderr, "Unsupported protocol\n");
+        return;
+    }
+}
+static int ip_get(char *mem)
+{
+    if (ip_head == ip_tail) {
+        fprintf(stderr, "ip q empty\n");
+        return -1;
+    }
+}
+static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+{
+    int len = cmd->cdw10;
+    fprintf(stderr, "nvme_ip_write\n");
+    /* fprintf(stderr, "fuse %x\n", cmd->fuse); */
+    /* fprintf(stderr, "prp1 %lx prp2 %lx\n", cmd->prp1, cmd->prp2); */
+    /* fprintf(stderr, "res1 %lx mptr %lx\n", cmd->res1, cmd->mptr); */
+    /* fprintf(stderr, "cdw10 %x cdw11 %x\n", cmd->cdw10, cmd->cdw11); */
+
+    void *buf = qemu_map_ram_ptr(NULL, cmd->prp1);
+    fprintf(stderr, "buf %p\n", buf);
+    if (buf != NULL) {
+        fprintf(stderr, "%c\n", *(char *)buf);
+    }
+    ip_insert(cmd->cdw10, );
+    return NVME_SUCCESS;
+}
+static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
+{
+    fprintf(stderr, "nvme_ip_read\n");
+    /* fprintf(stderr, "%lx %lx\n", cmd->prp1, cmd->prp2); */
+    return NVME_SUCCESS;
+}
+
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
+    fprintf(stderr, "nvme_admin_cmd %x\n", cmd->opcode);
     switch (cmd->opcode) {
     case NVME_ADM_CMD_DELETE_SQ:
         return nvme_del_sq(n, cmd);
@@ -860,6 +979,10 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
+    case NVME_ADM_CMD_IP_WR:
+        return nvme_ip_write(n, cmd, req);
+    case NVME_ADM_CMD_IP_RD:
+        return nvme_ip_read(n, cmd, req);
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
