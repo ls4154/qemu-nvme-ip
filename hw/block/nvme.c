@@ -365,6 +365,136 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_NO_COMPLETE;
 }
 
+/*                      IP over NVMe                        */
+
+struct ip_hdr {
+    uint8_t ihl : 4;
+    uint8_t version : 4;
+    uint8_t tos;
+    uint16_t len;
+    uint16_t id;
+    uint16_t frag_offset;
+    uint8_t ttl;
+    uint8_t protocol;
+    uint16_t check;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint8_t data[];
+} __attribute__((packed));
+
+struct icmp_hdr {
+    uint8_t type;
+    uint8_t code;
+    uint16_t checksum;
+    uint32_t rest;
+} __attribute__((packed));
+
+static int ip_cnt = 0;
+static int ip_len = 0;
+static int ip_buf[4096];
+
+static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    /* uint32_t nlb  = le32_to_cpu(rw->nlb) + 1; */
+    /* uint64_t slba = le64_to_cpu(rw->slba); */
+    uint64_t prp1 = le64_to_cpu(rw->prp1);
+    uint64_t prp2 = le64_to_cpu(rw->prp2);
+
+    fprintf(stderr, "nvme ip read\n");
+    unsigned char *ptr = (unsigned char *)ip_buf;
+    for (int i = 0; i < ip_len; i++) {
+        fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]);
+    }
+    fprintf(stderr, "\n");
+
+    if (ip_cnt <= 0) {
+        fprintf(stderr, "nothing to read\n");
+        return NVME_INVALID_FIELD;
+    }
+    ip_cnt--;
+    fprintf(stderr, "read %d bytes\n", ip_len);
+
+    return nvme_dma_read_prp(n, (uint8_t *)ip_buf, ip_len, prp1, prp2);
+}
+
+static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
+{
+    uint16_t ret;
+    char buf[4096];
+    NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
+    uint64_t mptr = le64_to_cpu(rw->mptr);
+    uint64_t prp1 = le64_to_cpu(rw->prp1);
+    uint64_t prp2 = le64_to_cpu(rw->prp2);
+    uint64_t slba = le64_to_cpu(rw->slba);
+    uint32_t nlb  = le32_to_cpu(rw->nlb) + 1;
+    uint16_t control = le64_to_cpu(rw->control);
+    uint32_t dsmgmt = le64_to_cpu(rw->dsmgmt);
+
+    memset(buf, 0, sizeof(buf));
+
+    fprintf(stderr, "nvme ip write\n");
+    fprintf(stderr, "mptr : %lu\n", mptr);
+    fprintf(stderr, "prp1 : %lu\n", prp1);
+    fprintf(stderr, "prp2 : %lu\n", prp2);
+    fprintf(stderr, "slba : %lu\n", slba);
+    fprintf(stderr, "nlb : %u\n", nlb);
+    fprintf(stderr, "ctrl : %u\n", control);
+    fprintf(stderr, "dsmgmt : %u\n", dsmgmt);
+
+    ret = nvme_dma_write_prp(n, (uint8_t *)buf, 100, prp1, prp2);
+
+    if (ret != NVME_SUCCESS) {
+        fprintf(stderr, "nvme dma write failed\n");
+        return ret;
+    }
+
+    struct ip_hdr *iphdr = (void *)buf;
+    struct icmp_hdr *icmphdr = (void *)iphdr->data;
+    uint32_t addr_buf;
+
+    ip_len = ntohs(iphdr->len);
+
+    unsigned char *ptr = (unsigned char *)buf;
+    for (int i = 0; i < ip_len; i++) {
+        fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]);
+    }
+    fprintf(stderr, "\n");
+
+    if (iphdr->version != 4) {
+        fprintf(stderr, "not IPV4\n");
+    }
+#define IP_ICMP 0x01
+#define IP_TCP 0x06
+#define IP_UDP 0x11
+    switch (iphdr->protocol) {
+    case IP_ICMP:
+        fprintf(stderr, "replying\n");
+        addr_buf = iphdr->saddr;
+        iphdr->saddr = iphdr->daddr;
+        iphdr->daddr = addr_buf;
+
+#define ICMP_REPLY           0x00
+        icmphdr->type = ICMP_REPLY;
+        break;
+    case IP_TCP:
+        fprintf(stderr, "TCP not supported\n");
+        break;
+    case IP_UDP:
+        fprintf(stderr, "UDP not supported\n");
+        break;
+    default:
+        fprintf(stderr, "Unsupported protocol\n");
+        break;
+    }
+
+    memcpy(ip_buf, buf, ip_len);
+    fprintf(stderr, "write %d bytes\n", ip_len);
+    ip_cnt++;
+
+    return ret;
+}
+
 static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     NvmeRequest *req)
 {
@@ -382,6 +512,13 @@ static uint16_t nvme_rw(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     enum BlockAcctType acct = is_write ? BLOCK_ACCT_WRITE : BLOCK_ACCT_READ;
 
     trace_nvme_rw(is_write ? "write" : "read", nlb, data_size, slba);
+
+    if ((slba >> 48) != 0) {
+        if (is_write)
+            return nvme_ip_write(n, ns, cmd);
+        else
+            return nvme_ip_read(n, ns, cmd);
+    }
 
     if (unlikely((slba + nlb) > ns->id_ns.nsze)) {
         block_acct_invalid(blk_get_stats(n->conf.blk), acct);
@@ -844,122 +981,104 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
-struct ip_hdr {
-    uint8_t ihl : 4;
-    uint8_t version : 4;
-    uint8_t tos;
-    uint16_t len;
-    uint16_t id;
-    uint16_t frag_offset;
-    uint8_t ttl;
-    uint8_t protocol;
-    uint16_t check;
-    uint32_t saddr;
-    uint32_t daddr;
-    uint8_t data[];
-} __attribute__((packed));
-struct icmp_hdr {
-    uint8_t type;
-    uint8_t code;
-    uint16_t checksum;
-    uint32_t rest;
-} __attribute__((packed));
-uint16_t checksum(void *addr, int count)
-{
-    uint32_t sum = 0;
-    uint16_t * ptr = addr;
-    while (count > 1)  {
-        sum += * ptr++;
-        count -= 2;
-    }
-    if (count > 0)
-        sum += *(uint8_t *)ptr;
-    while (sum >> 16)
-        sum = (sum & 0xffff) + (sum >> 16);
-    return ~sum;
-}
-struct ip_pkt {
-    int len;
-    char data[400];
-};
-static int ip_head = 0, ip_tail = 0;
-static struct ip_pkt ip_buffer[55];
-static void ip_insert(int len, char *data)
-{
-    if ((ip_head + 1) % 55 == ip_tail) {
-        fprintf(stderr, "ip q full\n");
-        return;
-    }
-    if (len >= 400)
-        return;
+/* static uint16_t checksum(void *addr, int count) */
+/* { */
+/*     uint32_t sum = 0; */
+/*     uint16_t * ptr = addr; */
+/*     while (count > 1)  { */
+/*         sum += * ptr++; */
+/*         count -= 2; */
+/*     } */
+/*     if (count > 0) */
+/*         sum += *(uint8_t *)ptr; */
+/*     while (sum >> 16) */
+/*         sum = (sum & 0xffff) + (sum >> 16); */
+/*     return ~sum; */
+/* } */
+/* #define IP_QSIZE 100 */
+/* struct ip_pkt { */
+/*     int len; */
+/*     char data[400]; */
+/* }; */
+/* static int ip_head = 0; */
+/* static int ip_tail = 0; */
+/* static struct ip_pkt ip_buffer[IP_QSIZE]; */
+/* static void ip_insert(int len, char *data) */
+/* { */
+/*     if ((ip_head + 1) % IP_QSIZE == ip_tail) { */
+/*         fprintf(stderr, "ip q full\n"); */
+/*         return; */
+/*     } */
+/*     if (len >= 400) */
+/*         return; */
 
-    ip_buffer[ip_head].len = len;
-    memcpy(ip_buffer[ip_head].data, data, len);
+/*     fprintf(stderr, "ip insert\n"); */
+/*     ip_buffer[ip_head].len = len; */
+/*     memcpy(ip_buffer[ip_head].data, data, len); */
 
-    struct ip_hdr *iphdr = (void *)ip_buffer[ip_head].data;
-    struct icmp_hdr *icmphdr = (void *)iphdr->data;
-    uint32_t addr_buf;
-    if (hdr->version != 4) {
-        fprintf(stderr, "not IPV4\n");
-        return;
-    }
-#define IP_ICMP 0x01
-#define IP_TCP 0x06
-#define IP_UDP 0x11
-    switch (hdr->protocol) {
-    case IP_ICMP:
-        fprintf(stderr, "replying\n");
-        addr_buf = iphdr->saddr;
-        iphdr->saddr = iphdr->daddr;
-        iphdr->daddr = addr_buf;
+/*     struct ip_hdr *iphdr = (void *)ip_buffer[ip_head].data; */
+/*     struct icmp_hdr *icmphdr = (void *)iphdr->data; */
+/*     uint32_t addr_buf; */
+/*     if (iphdr->version != 4) { */
+/*         fprintf(stderr, "not IPV4\n"); */
+/*         return; */
+/*     } */
+/* #define IP_ICMP 0x01 */
+/* #define IP_TCP 0x06 */
+/* #define IP_UDP 0x11 */
+/*     switch (iphdr->protocol) { */
+/*     case IP_ICMP: */
+/*         fprintf(stderr, "replying\n"); */
+/*         addr_buf = iphdr->saddr; */
+/*         iphdr->saddr = iphdr->daddr; */
+/*         iphdr->daddr = addr_buf; */
 
-#define ICMP_REPLY           0x00
-        icmphdr->type = ICMP_REPLY;
-        icmphdr->code = 0;
-        icmphdr->checksum = 0;
-        icmphdr->checksum = checksum(icmphdr, len - 4 * iphdr->ihl);
-        break;
-    case IP_TCP:
-        fprintf(stderr, "TCP not supported\n");
-        return;
-    case IP_UDP:
-        fprintf(stderr, "UDP not supported\n");
-        return;
-    default:
-        fprintf(stderr, "Unsupported protocol\n");
-        return;
-    }
-}
-static int ip_get(char *mem)
-{
-    if (ip_head == ip_tail) {
-        fprintf(stderr, "ip q empty\n");
-        return -1;
-    }
-}
-static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    int len = cmd->cdw10;
-    fprintf(stderr, "nvme_ip_write\n");
-    /* fprintf(stderr, "fuse %x\n", cmd->fuse); */
-    /* fprintf(stderr, "prp1 %lx prp2 %lx\n", cmd->prp1, cmd->prp2); */
-    /* fprintf(stderr, "res1 %lx mptr %lx\n", cmd->res1, cmd->mptr); */
-    /* fprintf(stderr, "cdw10 %x cdw11 %x\n", cmd->cdw10, cmd->cdw11); */
+/* #define ICMP_REPLY           0x00 */
+/*         icmphdr->type = ICMP_REPLY; */
+/*         icmphdr->code = 0; */
+/*         icmphdr->checksum = 0; */
+/*         icmphdr->checksum = checksum(icmphdr, len - 4 * iphdr->ihl); */
+/*         break; */
+/*     case IP_TCP: */
+/*         fprintf(stderr, "TCP not supported\n"); */
+/*         return; */
+/*     case IP_UDP: */
+/*         fprintf(stderr, "UDP not supported\n"); */
+/*         return; */
+/*     default: */
+/*         fprintf(stderr, "Unsupported protocol\n"); */
+/*         return; */
+/*     } */
+/* } */
+/* static int ip_get(char *mem) */
+/* { */
+/*     if (ip_head == ip_tail) { */
+/*         fprintf(stderr, "ip q empty\n"); */
+/*         return -1; */
+/*     } */
+/* } */
+/* static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req) */
+/* { */
+/*     int len = cmd->cdw10; */
+/*     fprintf(stderr, "nvme_ip_write\n"); */
+/*     fprintf(stderr, "fuse %x\n", cmd->fuse); */
+/*     fprintf(stderr, "prp1 %lx prp2 %lx\n", cmd->prp1, cmd->prp2); */
+/*     fprintf(stderr, "res1 %lx mptr %lx\n", cmd->res1, cmd->mptr); */
+/*     fprintf(stderr, "cdw10 %x cdw11 %x\n", cmd->cdw10, cmd->cdw11); */
 
-    void *buf = qemu_map_ram_ptr(NULL, cmd->prp1);
-    fprintf(stderr, "buf %p\n", buf);
-    if (buf != NULL) {
-        fprintf(stderr, "%c\n", *(char *)buf);
-    }
-    ip_insert(cmd->cdw10, );
-    return NVME_SUCCESS;
-}
-static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
-{
-    fprintf(stderr, "nvme_ip_read\n");
-    /* fprintf(stderr, "%lx %lx\n", cmd->prp1, cmd->prp2); */
-    return NVME_SUCCESS;
-}
+/*     char *buf = qemu_map_ram_ptr(NULL, cmd->prp1); */
+/*     fprintf(stderr, "buf %p\n", buf); */
+/*     for (int i = 0; i < len; i ++) { */
+/*         fprintf(stderr, "%c ", buf[i]); */
+/*     } */
+/*     ip_insert(cmd->cdw10, buf); */
+/*     return NVME_SUCCESS; */
+/* } */
+/* static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req) */
+/* { */
+/*     fprintf(stderr, "nvme_ip_read\n"); */
+/*     return NVME_INVALID_FIELD; */
+/* } */
 
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
@@ -979,10 +1098,10 @@ static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
         return nvme_set_feature(n, cmd, req);
     case NVME_ADM_CMD_GET_FEATURES:
         return nvme_get_feature(n, cmd, req);
-    case NVME_ADM_CMD_IP_WR:
-        return nvme_ip_write(n, cmd, req);
-    case NVME_ADM_CMD_IP_RD:
-        return nvme_ip_read(n, cmd, req);
+    /* case NVME_ADM_CMD_IP_WR: */
+    /*     return nvme_ip_write(n, cmd, req); */
+    /* case NVME_ADM_CMD_IP_RD: */
+    /*     return nvme_ip_read(n, cmd, req); */
     default:
         trace_nvme_err_invalid_admin_opc(cmd->opcode);
         return NVME_INVALID_OPCODE | NVME_DNR;
