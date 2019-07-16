@@ -402,10 +402,9 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint64_t prp2 = le64_to_cpu(rw->prp2);
 
     fprintf(stderr, "nvme ip read\n");
-    unsigned char *ptr = (unsigned char *)ip_buf;
-    for (int i = 0; i < ip_len; i++) {
-        fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]);
-    }
+    /* unsigned char *ptr = (unsigned char *)ip_buf; */
+    /* for (int i = 0; i < ip_len; i++) */
+    /*     fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]); */
     fprintf(stderr, "\n");
 
     if (ip_cnt <= 0) {
@@ -455,10 +454,9 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 
     ip_len = ntohs(iphdr->len);
 
-    unsigned char *ptr = (unsigned char *)buf;
-    for (int i = 0; i < ip_len; i++) {
-        fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]);
-    }
+    /* unsigned char *ptr = (unsigned char *)buf; */
+    /* for (int i = 0; i < ip_len; i++) */
+    /*     fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]); */
     fprintf(stderr, "\n");
 
     if (iphdr->version != 4) {
