@@ -370,6 +370,12 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
 /***********************IP over NVMe*************************/
 #define IP_QSIZE 100
 
+#define IP_ICMP 0x01
+#define IP_TCP 0x06
+#define IP_UDP 0x11
+
+#define ICMP_REPLY 0x00
+
 struct ip_hdr {
     uint8_t ihl : 4;
     uint8_t version : 4;
@@ -416,12 +422,6 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     /* uint64_t slba = le64_to_cpu(rw->slba); */
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
-
-    /* fprintf(stderr, "nvme ip read\n"); */
-    /* unsigned char *ptr = (unsigned char *)ip_buf; */
-    /* for (int i = 0; i < ip_len; i++) */
-    /*     fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]); */
-    /* fprintf(stderr, "\n"); */
 
     pthread_mutex_lock(&ip_mtx);
     if (ip_empty()) {
@@ -480,18 +480,10 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 	return NVME_INVALID_FIELD;
     }
 
-    /* unsigned char *ptr = (unsigned char *)buf; */
-    /* for (int i = 0; i < len; i++) */
-    /*     fprintf(stderr, "%02x%c", ptr[i], " \n"[i % 8 == 7]); */
-    /* fprintf(stderr, "\n"); */
-
     if (iphdr->version != 4) {
         fprintf(stderr, "wr: not IPV4\n");
 	return NVME_INVALID_FIELD;
     }
-#define IP_ICMP 0x01
-#define IP_TCP 0x06
-#define IP_UDP 0x11
     switch (iphdr->protocol) {
     case IP_ICMP:
         fprintf(stderr, "wr: replying\n");
@@ -499,18 +491,14 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         iphdr->saddr = iphdr->daddr;
         iphdr->daddr = addr_buf;
 
-#define ICMP_REPLY           0x00
         icmphdr->type = ICMP_REPLY;
         break;
     case IP_TCP:
+    case IP_UDP:
         fprintf(stderr, "wr: tcp\n");
         addr_buf = iphdr->saddr;
         iphdr->saddr = iphdr->daddr;
         iphdr->daddr = addr_buf;
-        break;
-    case IP_UDP:
-        fprintf(stderr, "wr: UDP not supported\n");
-	return NVME_INVALID_FIELD;
         break;
     default:
         fprintf(stderr, "wr: Unsupported protocol\n");
