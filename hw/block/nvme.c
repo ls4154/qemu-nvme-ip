@@ -401,7 +401,7 @@ struct icmp_hdr {
 static int ip_head = 0;
 static int ip_tail = 0;
 static int ip_len[IP_QSIZE];
-static int ip_buf[IP_QSIZE][4096];
+static unsigned char ip_buf[IP_QSIZE][4096];
 
 static pthread_mutex_t ip_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -431,6 +431,11 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     }
     rc = nvme_dma_read_prp(n, (uint8_t *)ip_buf[ip_tail], ip_len[ip_tail], prp1, prp2);
     fprintf(stderr, "rd: read %d bytes\n", ip_len[ip_tail]);
+
+    for (int i = 0; i < ip_len[ip_tail]; i += 17)
+	fprintf(stderr, "%2x", ip_buf[ip_tail][i]);
+    fprintf(stderr, "\n");
+
     ip_tail = (ip_tail + 1) % IP_QSIZE;
     pthread_mutex_unlock(&ip_mtx);
 
@@ -515,6 +520,11 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     memcpy(ip_buf[ip_head], buf, len);
     ip_len[ip_head] = len;
     fprintf(stderr, "wr: write %d bytes\n", ip_len[ip_head]);
+
+    for (int i = 0; i < ip_len[ip_head]; i += 17)
+	fprintf(stderr, "%2x", ip_buf[ip_head][i]);
+    fprintf(stderr, "\n");
+
     ip_head = (ip_head + 1) % IP_QSIZE;
     pthread_mutex_unlock(&ip_mtx);
 
