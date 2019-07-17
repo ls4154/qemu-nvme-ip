@@ -426,14 +426,14 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     pthread_mutex_lock(&ip_mtx);
     if (ip_empty()) {
         /* fprintf(stderr, "nothing to read\n"); */
-	pthread_mutex_unlock(&ip_mtx);
+        pthread_mutex_unlock(&ip_mtx);
         return NVME_INVALID_FIELD;
     }
     rc = nvme_dma_read_prp(n, (uint8_t *)ip_buf[ip_tail], ip_len[ip_tail], prp1, prp2);
     fprintf(stderr, "rd: read %d bytes\n", ip_len[ip_tail]);
 
     for (int i = 0; i < ip_len[ip_tail]; i += 17)
-	fprintf(stderr, "%2x", ip_buf[ip_tail][i]);
+        fprintf(stderr, "%2x", ip_buf[ip_tail][i]);
     fprintf(stderr, "\n");
 
     ip_tail = (ip_tail + 1) % IP_QSIZE;
@@ -482,12 +482,12 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     len = ntohs(iphdr->len);
     if (len < 20 || len > 1500) {
         fprintf(stderr, "wr: packet length error\n");
-	return NVME_INVALID_FIELD;
+    return NVME_INVALID_FIELD;
     }
 
     if (iphdr->version != 4) {
         fprintf(stderr, "wr: not IPV4\n");
-	return NVME_INVALID_FIELD;
+    return NVME_INVALID_FIELD;
     }
     switch (iphdr->protocol) {
     case IP_ICMP:
@@ -507,22 +507,22 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         break;
     default:
         fprintf(stderr, "wr: Unsupported protocol\n");
-	return NVME_INVALID_FIELD;
+    return NVME_INVALID_FIELD;
         break;
     }
 
     pthread_mutex_lock(&ip_mtx);
     if (ip_full()) {
         fprintf(stderr, "wr: packet dropped\n");
-	pthread_mutex_unlock(&ip_mtx);
-	return NVME_INVALID_FIELD;
+    pthread_mutex_unlock(&ip_mtx);
+    return NVME_INVALID_FIELD;
     }
     memcpy(ip_buf[ip_head], buf, len);
     ip_len[ip_head] = len;
     fprintf(stderr, "wr: write %d bytes\n", ip_len[ip_head]);
 
     for (int i = 0; i < ip_len[ip_head]; i += 17)
-	fprintf(stderr, "%2x", ip_buf[ip_head][i]);
+    fprintf(stderr, "%2x", ip_buf[ip_head][i]);
     fprintf(stderr, "\n");
 
     ip_head = (ip_head + 1) % IP_QSIZE;
