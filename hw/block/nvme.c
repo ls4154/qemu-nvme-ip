@@ -401,7 +401,7 @@ struct icmp_hdr {
 static int ip_head = 0;
 static int ip_tail = 0;
 static int ip_len[IP_QSIZE];
-static unsigned char ip_buf[IP_QSIZE][4096];
+static unsigned char ip_buf[IP_QSIZE][5000];
 
 static pthread_mutex_t ip_mtx = PTHREAD_MUTEX_INITIALIZER;
 
@@ -432,9 +432,9 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     rc = nvme_dma_read_prp(n, (uint8_t *)ip_buf[ip_tail], ip_len[ip_tail], prp1, prp2);
     fprintf(stderr, "rd: read %d bytes\n", ip_len[ip_tail]);
 
-    for (int i = 0; i < ip_len[ip_tail]; i += 17)
-        fprintf(stderr, "%2x", ip_buf[ip_tail][i]);
-    fprintf(stderr, "\n");
+    /* for (int i = 0; i < ip_len[ip_tail]; i += 1) */
+    /*     fprintf(stderr, "%2x", ip_buf[ip_tail][i]); */
+    /* fprintf(stderr, "\n"); */
 
     ip_tail = (ip_tail + 1) % IP_QSIZE;
     pthread_mutex_unlock(&ip_mtx);
@@ -445,7 +445,7 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
     uint16_t ret;
-    char buf[4096];
+    unsigned char buf[4096];
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     /* uint64_t mptr = le64_to_cpu(rw->mptr); */
     uint64_t prp1 = le64_to_cpu(rw->prp1);
@@ -482,13 +482,14 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     len = ntohs(iphdr->len);
     if (len < 20 || len > 1500) {
         fprintf(stderr, "wr: packet length error\n");
-    return NVME_INVALID_FIELD;
+        return NVME_INVALID_FIELD;
     }
 
     if (iphdr->version != 4) {
         fprintf(stderr, "wr: not IPV4\n");
-    return NVME_INVALID_FIELD;
+        return NVME_INVALID_FIELD;
     }
+
     switch (iphdr->protocol) {
     case IP_ICMP:
         fprintf(stderr, "wr: replying\n");
@@ -521,9 +522,9 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     ip_len[ip_head] = len;
     fprintf(stderr, "wr: write %d bytes\n", ip_len[ip_head]);
 
-    for (int i = 0; i < ip_len[ip_head]; i += 17)
-    fprintf(stderr, "%2x", ip_buf[ip_head][i]);
-    fprintf(stderr, "\n");
+    /* for (int i = 0; i < ip_len[ip_head]; i += 1) */
+    /*     fprintf(stderr, "%2x", ip_buf[ip_head][i]); */
+    /* fprintf(stderr, "\n"); */
 
     ip_head = (ip_head + 1) % IP_QSIZE;
     pthread_mutex_unlock(&ip_mtx);
