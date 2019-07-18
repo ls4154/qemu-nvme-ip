@@ -33,6 +33,7 @@
 #include "hw/pci/pci.h"
 #include "sysemu/sysemu.h"
 #include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qapi/visitor.h"
 #include "sysemu/block-backend.h"
 
@@ -44,12 +45,240 @@
 
 #include <pthread.h>
 
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <linux/if_tun.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <net/if.h>
+
 #define NVME_GUEST_ERR(trace, fmt, ...) \
     do { \
         (trace_##trace)(__VA_ARGS__); \
         qemu_log_mask(LOG_GUEST_ERROR, #trace \
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
+
+/***********************IP over NVMe*************************/
+#define IP_QSIZE 100
+
+#define IP_ICMP 0x01
+#define IP_TCP 0x06
+#define IP_UDP 0x11
+
+/* #define ICMP_REPLY 0x00 */
+
+struct ip_hdr {
+    uint8_t ihl : 4;
+    uint8_t version : 4;
+    uint8_t tos;
+    uint16_t len;
+    uint16_t id;
+    uint16_t frag_offset;
+    uint8_t ttl;
+    uint8_t protocol;
+    uint16_t check;
+    uint32_t saddr;
+    uint32_t daddr;
+    uint8_t data[];
+} __attribute__((packed));
+
+#pragma pack(push, 1)
+struct IP_header {
+    uint32_t VER    : 4;
+    uint32_t IHL    : 4;
+    uint32_t TOS    : 8;
+    uint32_t LEN    : 16;
+    uint32_t ID     : 16;
+    uint32_t FLAG   : 16;
+    uint32_t TTL    : 8;
+    uint32_t PROC   : 8;
+    uint32_t CHK    : 16;
+    uint32_t SIP;
+    uint32_t DIP;
+
+    uint32_t OP0;
+    uint32_t OP1;
+    uint32_t OP2;
+    uint32_t OP3;
+};
+#pragma pack(pop)
+/* struct icmp_hdr { */
+/*     uint8_t type; */
+/*     uint8_t code; */
+/*     uint16_t checksum; */
+/*     uint32_t rest; */
+/* } __attribute__((packed)); */
+
+/* static int ip_head = 0; */
+/* static int ip_tail = 0; */
+/* static int ip_len[IP_QSIZE]; */
+/* static unsigned char ip_buf[IP_QSIZE][5000]; */
+
+/* static pthread_mutex_t ip_mtx = PTHREAD_MUTEX_INITIALIZER; */
+
+/* static int ip_empty(void) */
+/* { */
+/*     return ip_head == ip_tail; */
+/* } */
+/* static int ip_full(void) */
+/* { */
+/*     return (ip_head + 1) % IP_QSIZE == ip_tail; */
+/* } */
+///////////////////////////////////////////////////////////////////
+
+static pthread_t sock_thread = -1;
+
+#define PACKET_QUEUE_SIZE 250
+typedef struct qpacket{
+    int64_t len;
+    uint8_t buf[0];
+}qpacket;
+
+typedef struct packet_queue {
+    uint32_t head;
+    uint32_t tail;
+    qpacket* queue[PACKET_QUEUE_SIZE];
+}packet_queue;
+packet_queue queue1 = {.head = 0, .tail = 0};
+packet_queue queue2 = {.head = 0, .tail = 0};
+
+int packet_enqueue(packet_queue* q, qpacket* packet);
+qpacket* packet_dequeue(packet_queue* q);
+int tun_alloc(char *dev);
+int set_pp(char* adapterName, char* src, char* dst) ;
+void* toss_cli1(void* ptr);
+void* toss_cli2(void* ptr);
+
+/*
+ * single producer single consumer model does not need
+ * mutex lock 
+ */
+int packet_enqueue(packet_queue* q, qpacket* packet)
+{
+    if(q->head == (q->tail+1)%PACKET_QUEUE_SIZE) {
+        return -1;//queue full
+    }
+    else {
+        q->queue[(q->tail+1)%PACKET_QUEUE_SIZE] = packet;
+        q->tail = (q->tail+1)%PACKET_QUEUE_SIZE;
+        return 0;
+    }
+}
+
+qpacket* packet_dequeue(packet_queue* q)
+{
+    void* ret = 0;
+    if(q->head != q->tail) {
+        ret = q->queue[(q->head+1)%PACKET_QUEUE_SIZE];
+        q->head = (q->head+1)%PACKET_QUEUE_SIZE;
+    }
+    return ret;
+}
+
+int tun_alloc(char *dev) {
+  struct ifreq ifr;
+  int fd, err; 
+  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
+    return fd;  
+  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
+  if(*dev)
+    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+  else
+    memset(ifr.ifr_name, 0, IFNAMSIZ);
+  if ((err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
+    close(fd);
+    return err;
+  }
+  strcpy(dev, ifr.ifr_name);
+
+  //noblock for sio-based
+  //fcntl(fd, F_SETFL, O_NONBLOCK | O_ASYNC);
+
+  return fd;
+}
+
+int set_pp(char* adapterName, char* src, char* dst) 
+{
+  int sockfd;
+  struct ifreq ifr;
+  struct sockaddr_in* iaddr = (struct sockaddr_in*)&ifr.ifr_addr;
+  memset(&ifr, 0, sizeof(struct ifreq));
+  strcpy(ifr.ifr_name, adapterName); 
+
+  // open socket for ioctl(will be closed after ioctl)
+  if( (sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
+    fprintf(stderr, "SOCK\n");
+    return EXIT_FAILURE;
+  }
+
+  // set source address    
+  iaddr->sin_family = AF_INET;
+  iaddr->sin_port=htons(0);
+  iaddr->sin_addr.s_addr = inet_addr(src);
+  if(ioctl(sockfd, SIOCSIFADDR, (void *) &ifr) < 0) {
+    fprintf(stderr, "SIOCSIFADDR\n");
+    return EXIT_FAILURE;
+  }
+
+  // set destination address
+  iaddr->sin_addr.s_addr = inet_addr(dst);
+  if(ioctl(sockfd, SIOCSIFDSTADDR, (void *) &ifr) < 0) {
+    fprintf(stderr, "SIOCSIFDSTADDR\n");
+    return EXIT_FAILURE;
+  }
+
+  ifr.ifr_flags = IFF_UP|IFF_POINTOPOINT|IFF_RUNNING|IFF_NOARP|IFF_MULTICAST;
+  // activate point-to-point
+  if(ioctl(sockfd, SIOCSIFFLAGS, (void *) &ifr) < 0) {
+    fprintf(stderr, "SIOCSIFFLAGS\n");
+    return EXIT_FAILURE;
+  }
+  
+  // close socket
+  close(sockfd);
+  return 0;
+}
+
+void* toss_cli1(void* ptr)
+{
+    int tunFd = (int)ptr;
+    qpacket* pkt;
+
+    int cnt = 0;
+    while (1) {
+        while((pkt = packet_dequeue(&queue1)) == 0) {
+            printf("empty queue%d\n", (cnt++) % 10);
+            usleep(1000*100);
+        }
+        // int len = ntohs(((struct IP_header*)pkt->buf)->LEN);
+        write(tunFd, pkt->buf, 2000);
+        fprintf(stderr, "queue -> tun\n");
+    }
+    return 0;
+}
+
+void* toss_cli2(void* ptr)
+{
+    int tunFd = (int)ptr;
+    qpacket* pkt;
+
+    while (1) {
+        pkt = malloc(4096 + sizeof(qpacket));
+        read(tunFd, pkt->buf, 2000);
+        pkt->len = 4096;
+        packet_enqueue(&queue2, pkt);
+        //fprintf(stderr, "tun -> queue\n");
+    }
+    return 0;
+}
+
+///////////////////////////////////////////////////////////////////
 
 static void nvme_process_sq(void *opaque);
 
@@ -367,52 +596,6 @@ static uint16_t nvme_write_zeros(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd,
     return NVME_NO_COMPLETE;
 }
 
-/***********************IP over NVMe*************************/
-#define IP_QSIZE 100
-
-#define IP_ICMP 0x01
-#define IP_TCP 0x06
-#define IP_UDP 0x11
-
-#define ICMP_REPLY 0x00
-
-struct ip_hdr {
-    uint8_t ihl : 4;
-    uint8_t version : 4;
-    uint8_t tos;
-    uint16_t len;
-    uint16_t id;
-    uint16_t frag_offset;
-    uint8_t ttl;
-    uint8_t protocol;
-    uint16_t check;
-    uint32_t saddr;
-    uint32_t daddr;
-    uint8_t data[];
-} __attribute__((packed));
-
-struct icmp_hdr {
-    uint8_t type;
-    uint8_t code;
-    uint16_t checksum;
-    uint32_t rest;
-} __attribute__((packed));
-
-static int ip_head = 0;
-static int ip_tail = 0;
-static int ip_len[IP_QSIZE];
-static unsigned char ip_buf[IP_QSIZE][5000];
-
-static pthread_mutex_t ip_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-static int ip_empty(void)
-{
-    return ip_head == ip_tail;
-}
-static int ip_full(void)
-{
-    return (ip_head + 1) % IP_QSIZE == ip_tail;
-}
 
 static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
@@ -423,21 +606,12 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
 
-    pthread_mutex_lock(&ip_mtx);
-    if (ip_empty()) {
-        /* fprintf(stderr, "nothing to read\n"); */
-        pthread_mutex_unlock(&ip_mtx);
+    qpacket *node;
+    if (!(node = packet_dequeue(&queue2))) {
         return NVME_INVALID_FIELD;
     }
-    rc = nvme_dma_read_prp(n, (uint8_t *)ip_buf[ip_tail], ip_len[ip_tail], prp1, prp2);
-    fprintf(stderr, "rd: read %d bytes\n", ip_len[ip_tail]);
-
-    /* for (int i = 0; i < ip_len[ip_tail]; i += 1) */
-    /*     fprintf(stderr, "%2x", ip_buf[ip_tail][i]); */
-    /* fprintf(stderr, "\n"); */
-
-    ip_tail = (ip_tail + 1) % IP_QSIZE;
-    pthread_mutex_unlock(&ip_mtx);
+    rc = nvme_dma_read_prp(n, (uint8_t *)node->buf, node->len, prp1, prp2);
+    fprintf(stderr, "rd: read %ld bytes\n", node->len);
 
     return rc;
 }
@@ -445,27 +619,18 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
     uint16_t ret;
+    qpacket *buff;
     unsigned char buf[4096];
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
-    /* uint64_t mptr = le64_to_cpu(rw->mptr); */
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
     /* uint64_t slba = le64_to_cpu(rw->slba); */
     uint32_t nlb  = le32_to_cpu(rw->nlb);
-    /* uint16_t control = le64_to_cpu(rw->control); */
-    /* uint32_t dsmgmt = le64_to_cpu(rw->dsmgmt); */
     int len;
 
     memset(buf, 0, sizeof(buf));
 
     fprintf(stderr, "wr: nvme ip write\n");
-    /* fprintf(stderr, "mptr : %lu\n", mptr); */
-    /* fprintf(stderr, "prp1 : %lu\n", prp1); */
-    /* fprintf(stderr, "prp2 : %lu\n", prp2); */
-    /* fprintf(stderr, "slba : %lu\n", slba); */
-    /* fprintf(stderr, "nlb : %u\n", nlb); */
-    /* fprintf(stderr, "ctrl : %u\n", control); */
-    /* fprintf(stderr, "dsmgmt : %u\n", dsmgmt); */
 
     nlb = 1500;
     ret = nvme_dma_write_prp(n, (uint8_t *)buf, nlb, prp1, prp2);
@@ -476,7 +641,6 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     }
 
     struct ip_hdr *iphdr = (void *)buf;
-    struct icmp_hdr *icmphdr = (void *)iphdr->data;
     uint32_t addr_buf;
 
     len = ntohs(iphdr->len);
@@ -490,45 +654,12 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_INVALID_FIELD;
     }
 
-    switch (iphdr->protocol) {
-    case IP_ICMP:
-        fprintf(stderr, "wr: replying\n");
-        addr_buf = iphdr->saddr;
-        iphdr->saddr = iphdr->daddr;
-        iphdr->daddr = addr_buf;
-
-        icmphdr->type = ICMP_REPLY;
-        break;
-    case IP_TCP:
-    case IP_UDP:
-        fprintf(stderr, "wr: tcp\n");
-        addr_buf = iphdr->saddr;
-        iphdr->saddr = iphdr->daddr;
-        iphdr->daddr = addr_buf;
-        break;
-    default:
-        fprintf(stderr, "wr: Unsupported protocol\n");
-    return NVME_INVALID_FIELD;
-        break;
+    buff = malloc(len + sizeof(qpacket));
+    buff->len = len;
+    if (packet_enqueue(&queue1, buff) < 0) {
+        fprintf(stderr, "wr: queue full\n");
+        return NVME_INVALID_FIELD;
     }
-
-    pthread_mutex_lock(&ip_mtx);
-    if (ip_full()) {
-        fprintf(stderr, "wr: packet dropped\n");
-    pthread_mutex_unlock(&ip_mtx);
-    return NVME_INVALID_FIELD;
-    }
-    memcpy(ip_buf[ip_head], buf, len);
-    ip_len[ip_head] = len;
-    fprintf(stderr, "wr: write %d bytes\n", ip_len[ip_head]);
-
-    /* for (int i = 0; i < ip_len[ip_head]; i += 1) */
-    /*     fprintf(stderr, "%2x", ip_buf[ip_head][i]); */
-    /* fprintf(stderr, "\n"); */
-
-    ip_head = (ip_head + 1) % IP_QSIZE;
-    pthread_mutex_unlock(&ip_mtx);
-
 
     return ret;
 }
@@ -1661,6 +1792,22 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
 
+    fprintf(stderr, "nvme class init\n");
+
+    if (sock_thread == -1) {
+        char tun_name[IFNAMSIZ] = "tun77";
+        uint64_t tunFd = tun_alloc(tun_name);
+        char src[18] = "10.10.10.2";
+        char dst[18] = "10.10.10.1";
+        set_pp(tun_name, src, dst);
+        pthread_create(&sock_thread, NULL, toss_cli1, (void *)tunFd);
+        pthread_create(&sock_thread, NULL, toss_cli2, (void *)tunFd);
+
+        error_printf("echo start\n");
+        if (sock_thread==-1)
+            sock_thread = 0;
+    }
+
     pc->realize = nvme_realize;
     pc->exit = nvme_exit;
     pc->class_id = PCI_CLASS_STORAGE_EXPRESS;
@@ -1677,6 +1824,8 @@ static void nvme_class_init(ObjectClass *oc, void *data)
 static void nvme_instance_init(Object *obj)
 {
     NvmeCtrl *s = NVME(obj);
+
+    fprintf(stderr, "nvme instance init\n");
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/namespace@1,0",
