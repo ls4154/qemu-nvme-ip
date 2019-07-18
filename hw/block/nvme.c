@@ -240,11 +240,11 @@ void* toss_cli1(void* ptr)
     while (1) {
         while((pkt = packet_dequeue(&queue1)) == 0) {
             /* printf("empty queue%d\n", (cnt++) % 10); */
-            usleep(1000 * 10);
+            usleep(10);
         }
         // int len = ntohs(((struct IP_header*)pkt->buf)->LEN);
         write(tunFd, pkt->buf, pkt->len);
-        fprintf(stderr, "           queue1 ---> host : %ld bytes\n", pkt->len);
+        /* fprintf(stderr, "           queue1 ---> host : %ld bytes\n", pkt->len); */
     }
     return 0;
 }
@@ -259,14 +259,15 @@ void* toss_cli2(void* ptr)
         read(tunFd, pkt->buf, 2000);
         pkt->len = ntohs(((struct IP_header *)pkt->buf)->LEN);
         if (pkt->len < 20 || pkt->len > 1500) {
-            usleep(1000 * 10);
+            usleep(10);
             continue;
         }
         if (packet_enqueue(&queue2, pkt) < 0) {
             fprintf(stderr, "queue2 full\n");
+            usleep(100);
         }
-        fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len);
-        usleep(1000 * 10);
+        /* fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len); */
+        usleep(10);
     }
     return 0;
 }
@@ -610,7 +611,7 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return rc;
     }
     /* fprintf(stderr, "rd: read %ld bytes\n", node->len); */
-    fprintf(stderr, "guest <--- queue2 %ld bytes\n", node->len);
+    /* fprintf(stderr, "guest <--- queue2 %ld bytes\n", node->len); */
     free(node);
 
     return rc;
@@ -661,7 +662,7 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         fprintf(stderr, "wr: queue full\n");
         return NVME_INVALID_FIELD;
     }
-    fprintf(stderr, "guest ---> queue1 %ld bytes\n", buff->len);
+    /* fprintf(stderr, "guest ---> queue1 %ld bytes\n", buff->len); */
 
     return ret;
 }
