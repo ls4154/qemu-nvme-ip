@@ -64,14 +64,12 @@
             " in %s: " fmt "\n", __func__, ## __VA_ARGS__); \
     } while (0)
 
-/***********************IP over NVMe*************************/
+/////////////////////////////////////////////////////////////////
 #define IP_QSIZE 100
 
 #define IP_ICMP 0x01
 #define IP_TCP 0x06
 #define IP_UDP 0x11
-
-/* #define ICMP_REPLY 0x00 */
 
 struct ip_hdr {
     uint8_t ihl : 4;
@@ -108,29 +106,16 @@ struct IP_header {
     uint32_t OP3;
 };
 #pragma pack(pop)
-/* struct icmp_hdr { */
-/*     uint8_t type; */
-/*     uint8_t code; */
-/*     uint16_t checksum; */
-/*     uint32_t rest; */
-/* } __attribute__((packed)); */
 
-/* static int ip_head = 0; */
-/* static int ip_tail = 0; */
-/* static int ip_len[IP_QSIZE]; */
-/* static unsigned char ip_buf[IP_QSIZE][5000]; */
+/*
+        nvme_ip_wr                toss_cli1
+guest -------------->  queue1  -------------->  host
 
-/* static pthread_mutex_t ip_mtx = PTHREAD_MUTEX_INITIALIZER; */
 
-/* static int ip_empty(void) */
-/* { */
-/*     return ip_head == ip_tail; */
-/* } */
-/* static int ip_full(void) */
-/* { */
-/*     return (ip_head + 1) % IP_QSIZE == ip_tail; */
-/* } */
-///////////////////////////////////////////////////////////////////
+        nvme_ip_rd                toss_cli2
+guest <--------------  queue2  <--------------  host
+
+*/
 
 static pthread_t sock_thread = -1;
 
@@ -150,7 +135,7 @@ packet_queue queue2 = {.head = 0, .tail = 0};
 
 int packet_enqueue(packet_queue* q, qpacket* packet);
 qpacket* packet_dequeue(packet_queue* q);
-int tun_alloc(char *dev);
+int tun_alloc(char *dev, int flags);
 int set_pp(char* adapterName, char* src, char* dst) ;
 void* toss_cli1(void* ptr);
 void* toss_cli2(void* ptr);
@@ -181,68 +166,69 @@ qpacket* packet_dequeue(packet_queue* q)
     return ret;
 }
 
-int tun_alloc(char *dev) {
-  struct ifreq ifr;
-  int fd, err; 
-  if ((fd = open("/dev/net/tun", O_RDWR)) < 0)
-    return fd;  
-  ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
-  if(*dev)
-    strncpy(ifr.ifr_name, dev, IFNAMSIZ);
-  else
-    memset(ifr.ifr_name, 0, IFNAMSIZ);
-  if ((err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
-    close(fd);
-    return err;
-  }
-  strcpy(dev, ifr.ifr_name);
+int tun_alloc(char *dev, int flags)
+{
+    struct ifreq ifr;
+    int fd, err;
+    char *clonedev = "/dev/net/tun";
 
-  //noblock for sio-based
-  //fcntl(fd, F_SETFL, O_NONBLOCK | O_ASYNC);
+    if ((fd = open(clonedev, O_RDWR)) < 0) {
+        fprintf(stderr, "cannot open clone dev\n");
+        return fd;
+    }
 
-  return fd;
+    memset(&ifr, 0, sizeof(ifr));
+
+    ifr.ifr_flags = flags;
+
+    if (*dev) {
+        strncpy(ifr.ifr_name, dev, IFNAMSIZ);
+    }
+
+    if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0) {
+        fprintf(stderr, "ioctl failed\n");
+        close(fd);
+        return err;
+    }
+
+    strcpy(dev, ifr.ifr_name);
+
+    return fd;
 }
 
-int set_pp(char* adapterName, char* src, char* dst) 
-{
-  int sockfd;
-  struct ifreq ifr;
-  struct sockaddr_in* iaddr = (struct sockaddr_in*)&ifr.ifr_addr;
-  memset(&ifr, 0, sizeof(struct ifreq));
-  strcpy(ifr.ifr_name, adapterName); 
+int ip_addr(const char *if_name, const char *ip_addr, const char *netmask) {
+    struct ifreq ifr;
+    struct sockaddr_in *addr = (struct sockaddr_in *)&ifr.ifr_addr;
+    int sockfd = socket(PF_INET, SOCK_RAW, IPPROTO_RAW);
 
-  // open socket for ioctl(will be closed after ioctl)
-  if( (sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL))) < 0) {
-    fprintf(stderr, "SOCK\n");
-    return EXIT_FAILURE;
-  }
+    if (sockfd < 0) {
+        return -1;
+    }
 
-  // set source address    
-  iaddr->sin_family = AF_INET;
-  iaddr->sin_port=htons(0);
-  iaddr->sin_addr.s_addr = inet_addr(src);
-  if(ioctl(sockfd, SIOCSIFADDR, (void *) &ifr) < 0) {
-    fprintf(stderr, "SIOCSIFADDR\n");
-    return EXIT_FAILURE;
-  }
+    memset(&ifr, 0, sizeof(struct ifreq));
+    strncpy(ifr.ifr_name, if_name, IFNAMSIZ);
+    ifr.ifr_addr.sa_family = AF_INET;
 
-  // set destination address
-  iaddr->sin_addr.s_addr = inet_addr(dst);
-  if(ioctl(sockfd, SIOCSIFDSTADDR, (void *) &ifr) < 0) {
-    fprintf(stderr, "SIOCSIFDSTADDR\n");
-    return EXIT_FAILURE;
-  }
+    inet_pton(AF_INET, ip_addr, &addr->sin_addr);
+    if(ioctl(sockfd, SIOCSIFADDR, &ifr) < 0) {
+        return -1;
+    }
 
-  ifr.ifr_flags = IFF_UP|IFF_POINTOPOINT|IFF_RUNNING|IFF_NOARP|IFF_MULTICAST;
-  // activate point-to-point
-  if(ioctl(sockfd, SIOCSIFFLAGS, (void *) &ifr) < 0) {
-    fprintf(stderr, "SIOCSIFFLAGS\n");
-    return EXIT_FAILURE;
-  }
-  
-  // close socket
-  close(sockfd);
-  return 0;
+    inet_pton(AF_INET, netmask, &addr->sin_addr);
+    if(ioctl(sockfd, SIOCSIFNETMASK, &ifr) < 0) {
+        return -1;
+    }
+
+    if(ioctl(sockfd, SIOCGIFFLAGS, &ifr) < 0) {
+        return -1;
+    }
+    ifr.ifr_flags |= IFF_UP;
+
+    if(ioctl(sockfd, SIOCSIFFLAGS, &ifr) < 0) {
+        return -1;
+    }
+
+    return 0;
 }
 
 void* toss_cli1(void* ptr)
@@ -253,12 +239,12 @@ void* toss_cli1(void* ptr)
     int cnt = 0;
     while (1) {
         while((pkt = packet_dequeue(&queue1)) == 0) {
-            printf("empty queue%d\n", (cnt++) % 10);
-            usleep(1000*100);
+            /* printf("empty queue%d\n", (cnt++) % 10); */
+            usleep(1000 * 10);
         }
         // int len = ntohs(((struct IP_header*)pkt->buf)->LEN);
-        write(tunFd, pkt->buf, 2000);
-        fprintf(stderr, "queue -> tun\n");
+        write(tunFd, pkt->buf, pkt->len);
+        fprintf(stderr, "           queue1 ---> host : %ld bytes\n", pkt->len);
     }
     return 0;
 }
@@ -271,9 +257,16 @@ void* toss_cli2(void* ptr)
     while (1) {
         pkt = malloc(4096 + sizeof(qpacket));
         read(tunFd, pkt->buf, 2000);
-        pkt->len = 4096;
-        packet_enqueue(&queue2, pkt);
-        //fprintf(stderr, "tun -> queue\n");
+        pkt->len = ntohs(((struct IP_header *)pkt->buf)->LEN);
+        if (pkt->len < 20 || pkt->len > 1500) {
+            usleep(1000 * 10);
+            continue;
+        }
+        if (packet_enqueue(&queue2, pkt) < 0) {
+            fprintf(stderr, "queue2 full\n");
+        }
+        fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len);
+        usleep(1000 * 10);
     }
     return 0;
 }
@@ -611,7 +604,14 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         return NVME_INVALID_FIELD;
     }
     rc = nvme_dma_read_prp(n, (uint8_t *)node->buf, node->len, prp1, prp2);
-    fprintf(stderr, "rd: read %ld bytes\n", node->len);
+
+    if (rc != NVME_SUCCESS) {
+        fprintf(stderr, "rd: nvme_dma_read failed\n");
+        return rc;
+    }
+    /* fprintf(stderr, "rd: read %ld bytes\n", node->len); */
+    fprintf(stderr, "guest <--- queue2 %ld bytes\n", node->len);
+    free(node);
 
     return rc;
 }
@@ -630,7 +630,7 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 
     memset(buf, 0, sizeof(buf));
 
-    fprintf(stderr, "wr: nvme ip write\n");
+    /* fprintf(stderr, "wr: nvme ip write\n"); */
 
     nlb = 1500;
     ret = nvme_dma_write_prp(n, (uint8_t *)buf, nlb, prp1, prp2);
@@ -655,11 +655,13 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     }
 
     buff = malloc(len + sizeof(qpacket));
+    memcpy(buff->buf, buf, len);
     buff->len = len;
     if (packet_enqueue(&queue1, buff) < 0) {
         fprintf(stderr, "wr: queue full\n");
         return NVME_INVALID_FIELD;
     }
+    fprintf(stderr, "guest ---> queue1 %ld bytes\n", buff->len);
 
     return ret;
 }
@@ -1796,10 +1798,21 @@ static void nvme_class_init(ObjectClass *oc, void *data)
 
     if (sock_thread == -1) {
         char tun_name[IFNAMSIZ] = "tun77";
-        uint64_t tunFd = tun_alloc(tun_name);
-        char src[18] = "10.10.10.2";
-        char dst[18] = "10.10.10.1";
-        set_pp(tun_name, src, dst);
+        char addr[16] = "10.0.0.2";
+        char netmask[16] = "255.255.255.0";
+
+        uint64_t tunFd = tun_alloc(tun_name, IFF_TUN | IFF_NO_PI);
+
+        if (tunFd < 0) {
+            fprintf(stderr, "tun alloc failed\n");
+            exit(1);
+        }
+
+        if (ip_addr(tun_name, addr, netmask) < 0) {
+            fprintf(stderr, "ip addr failed\n");
+            exit(1);
+        }
+
         pthread_create(&sock_thread, NULL, toss_cli1, (void *)tunFd);
         pthread_create(&sock_thread, NULL, toss_cli2, (void *)tunFd);
 
