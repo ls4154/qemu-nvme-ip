@@ -65,6 +65,8 @@
     } while (0)
 
 /////////////////////////////////////////////////////////////////
+#define MTU_SIZE 3000
+
 #define IP_QSIZE 100
 
 #define IP_ICMP 0x01
@@ -108,60 +110,57 @@ struct IP_header {
 #pragma pack(pop)
 
 /*
-        nvme_ip_wr                toss_cli1
-guest -------------->  queue1  -------------->  host
+        nvme_ip_write              toss_cli1
+guest --------------->  queue1  --------------->  host
 
 
-        nvme_ip_rd                toss_cli2
-guest <--------------  queue2  <--------------  host
+        nvme_ip_read               toss_cli2
+guest <---------------  queue2  <---------------  host
 
 */
 
 static pthread_t sock_thread = -1;
 
-#define PACKET_QUEUE_SIZE 250
-typedef struct qpacket{
+#define PACKET_QUEUE_SIZE 1000
+
+typedef struct qpacket {
     int64_t len;
     uint8_t buf[0];
-}qpacket;
+} qpacket;
 
 typedef struct packet_queue {
     uint32_t head;
     uint32_t tail;
-    qpacket* queue[PACKET_QUEUE_SIZE];
-}packet_queue;
+    qpacket *queue[PACKET_QUEUE_SIZE];
+} packet_queue;
 packet_queue queue1 = {.head = 0, .tail = 0};
 packet_queue queue2 = {.head = 0, .tail = 0};
 
-int packet_enqueue(packet_queue* q, qpacket* packet);
-qpacket* packet_dequeue(packet_queue* q);
+int packet_enqueue(packet_queue *q, qpacket *packet);
+qpacket *packet_dequeue(packet_queue *q);
 int tun_alloc(char *dev, int flags);
-int set_pp(char* adapterName, char* src, char* dst) ;
-void* toss_cli1(void* ptr);
-void* toss_cli2(void* ptr);
+int ip_addr(const char *if_name, const char *ip_addr, const char *netmask);
+void *toss_cli1(void *ptr);
+void *toss_cli2(void *ptr);
 
-/*
- * single producer single consumer model does not need
- * mutex lock 
- */
-int packet_enqueue(packet_queue* q, qpacket* packet)
+int packet_enqueue(packet_queue *q, qpacket *packet)
 {
-    if(q->head == (q->tail+1)%PACKET_QUEUE_SIZE) {
-        return -1;//queue full
+    if(q->head == (q->tail + 1) % PACKET_QUEUE_SIZE) {
+        return -1; // queue full
     }
     else {
-        q->queue[(q->tail+1)%PACKET_QUEUE_SIZE] = packet;
-        q->tail = (q->tail+1)%PACKET_QUEUE_SIZE;
+        q->queue[(q->tail + 1) % PACKET_QUEUE_SIZE] = packet;
+        q->tail = (q->tail + 1) % PACKET_QUEUE_SIZE;
         return 0;
     }
 }
 
-qpacket* packet_dequeue(packet_queue* q)
+qpacket *packet_dequeue(packet_queue *q)
 {
-    void* ret = 0;
+    void *ret = 0;
     if(q->head != q->tail) {
-        ret = q->queue[(q->head+1)%PACKET_QUEUE_SIZE];
-        q->head = (q->head+1)%PACKET_QUEUE_SIZE;
+        ret = q->queue[(q->head + 1) % PACKET_QUEUE_SIZE];
+        q->head = (q->head + 1) % PACKET_QUEUE_SIZE;
     }
     return ret;
 }
@@ -231,10 +230,10 @@ int ip_addr(const char *if_name, const char *ip_addr, const char *netmask) {
     return 0;
 }
 
-void* toss_cli1(void* ptr)
+void *toss_cli1(void *ptr)
 {
     int tunFd = (int)ptr;
-    qpacket* pkt;
+    qpacket *pkt;
 
     int cnt = 0;
     while (1) {
@@ -249,16 +248,16 @@ void* toss_cli1(void* ptr)
     return 0;
 }
 
-void* toss_cli2(void* ptr)
+void *toss_cli2(void *ptr)
 {
     int tunFd = (int)ptr;
-    qpacket* pkt;
+    qpacket *pkt;
 
     while (1) {
         pkt = malloc(4096 + sizeof(qpacket));
-        read(tunFd, pkt->buf, 2000);
+        read(tunFd, pkt->buf, MTU_SIZE);
         pkt->len = ntohs(((struct IP_header *)pkt->buf)->LEN);
-        if (pkt->len < 20 || pkt->len > 1500) {
+        if (pkt->len < 20 || pkt->len > MTU_SIZE) {
             usleep(10);
             continue;
         }
@@ -633,7 +632,7 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 
     /* fprintf(stderr, "wr: nvme ip write\n"); */
 
-    nlb = 1500;
+    nlb = MTU_SIZE;
     ret = nvme_dma_write_prp(n, (uint8_t *)buf, nlb, prp1, prp2);
 
     if (ret != NVME_SUCCESS) {
@@ -645,7 +644,7 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint32_t addr_buf;
 
     len = ntohs(iphdr->len);
-    if (len < 20 || len > 1500) {
+    if (len < 20 || len > MTU_SIZE) {
         fprintf(stderr, "wr: packet length error\n");
         return NVME_INVALID_FIELD;
     }
@@ -1795,8 +1794,6 @@ static void nvme_class_init(ObjectClass *oc, void *data)
     DeviceClass *dc = DEVICE_CLASS(oc);
     PCIDeviceClass *pc = PCI_DEVICE_CLASS(oc);
 
-    fprintf(stderr, "nvme class init\n");
-
     if (sock_thread == -1) {
         char tun_name[IFNAMSIZ] = "tun77";
         char addr[16] = "10.0.0.2";
@@ -1838,8 +1835,6 @@ static void nvme_class_init(ObjectClass *oc, void *data)
 static void nvme_instance_init(Object *obj)
 {
     NvmeCtrl *s = NVME(obj);
-
-    fprintf(stderr, "nvme instance init\n");
 
     device_add_bootindex_property(obj, &s->conf.bootindex,
                                   "bootindex", "/namespace@1,0",
