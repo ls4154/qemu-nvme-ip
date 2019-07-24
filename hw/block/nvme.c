@@ -65,6 +65,17 @@
     } while (0)
 
 /////////////////////////////////////////////////////////////////
+
+/*
+        nvme_ip_write             queue_to_tun
+guest --------------->  queue1  --------------->  host
+
+
+        nvme_ip_read              tun_to_queue
+guest <---------------  queue2  <---------------  host
+
+*/
+
 #define MTU_SIZE 1500
 
 #define IP_ICMP 0x01
@@ -86,87 +97,50 @@ struct ip_hdr {
     uint8_t data[];
 } __attribute__((packed));
 
-#pragma pack(push, 1)
-struct IP_header {
-    uint32_t VER    : 4;
-    uint32_t IHL    : 4;
-    uint32_t TOS    : 8;
-    uint32_t LEN    : 16;
-    uint32_t ID     : 16;
-    uint32_t FLAG   : 16;
-    uint32_t TTL    : 8;
-    uint32_t PROC   : 8;
-    uint32_t CHK    : 16;
-    uint32_t SIP;
-    uint32_t DIP;
-
-    uint32_t OP0;
-    uint32_t OP1;
-    uint32_t OP2;
-    uint32_t OP3;
-};
-#pragma pack(pop)
-
-/*
-        nvme_ip_write             queue_to_tun
-guest --------------->  queue1  --------------->  host
-
-
-        nvme_ip_read              tun_to_queue
-guest <---------------  queue2  <---------------  host
-
-*/
-
 static pthread_t sock_thread = -1;
 
-#define PACKET_QUEUE_SIZE 1000
+#define PACKET_QUEUE_SIZE 10000
 
 typedef struct qpacket {
     int64_t len;
-    uint8_t buf[0];
+    uint8_t buf[MTU_SIZE];
 } qpacket;
 
 typedef struct packet_queue {
     uint32_t head;
     uint32_t tail;
-    qpacket *queue[PACKET_QUEUE_SIZE];
+    qpacket queue[PACKET_QUEUE_SIZE];
 } packet_queue;
+
 packet_queue queue1 = {.head = 0, .tail = 0};
 packet_queue queue2 = {.head = 0, .tail = 0};
 
-int packet_enqueue(packet_queue *q, qpacket *packet);
-qpacket *packet_dequeue(packet_queue *q);
+qpacket *packet_head(packet_queue *q);
+qpacket *packet_tail(packet_queue *q);
+
+/* int packet_enqueue(packet_queue *q, qpacket *packet); */
+/* qpacket *packet_dequeue(packet_queue *q); */
+
 int tun_alloc(char *dev, int flags);
 int ip_addr(const char *if_name, const char *ip_addr, const char *netmask);
+
 void *queue_to_tun(void *ptr);
 void *tun_to_queue(void *ptr);
 
-int packet_enqueue(packet_queue *q, qpacket *packet)
+inline int queue_full(packet_queue *q)
 {
-    if(q->head == (q->tail + 1) % PACKET_QUEUE_SIZE) {
-        return -1; // queue full
-    } else {
-        q->queue[(q->tail + 1) % PACKET_QUEUE_SIZE] = packet;
-        q->tail = (q->tail + 1) % PACKET_QUEUE_SIZE;
-        return 0;
-    }
+    return (q->tail + 1) % PACKET_QUEUE_SIZE == q->head;
 }
-
-qpacket *packet_dequeue(packet_queue *q)
+inline int queue_empty(packet_queue *q)
 {
-    void *ret = 0;
-    if(q->head != q->tail) {
-        ret = q->queue[(q->head + 1) % PACKET_QUEUE_SIZE];
-        q->head = (q->head + 1) % PACKET_QUEUE_SIZE;
-    }
-    return ret;
+    return q->head == q->tail;
 }
 
 int tun_alloc(char *dev, int flags)
 {
     struct ifreq ifr;
     int fd, err;
-    char *clonedev = "/dev/net/tun";
+    const char *clonedev = "/dev/net/tun";
 
     if ((fd = open(clonedev, O_RDWR)) < 0) {
         fprintf(stderr, "cannot open clone dev\n");
@@ -230,39 +204,40 @@ int ip_addr(const char *if_name, const char *ip_addr, const char *netmask)
 
 void *queue_to_tun(void *ptr)
 {
-    int tunFd = (int)ptr;
+    int tunfd = (int)(long)ptr;
     qpacket *pkt;
 
-    int cnt = 0;
     while (1) {
-        while((pkt = packet_dequeue(&queue1)) == 0) {
-            /* printf("empty queue%d\n", (cnt++) % 10); */
+        if (queue_empty(&queue1)) {
             usleep(10);
+            continue;
         }
-        // int len = ntohs(((struct IP_header*)pkt->buf)->LEN);
-        write(tunFd, pkt->buf, pkt->len);
-        /* fprintf(stderr, "           queue1 ---> host : %ld bytes\n", pkt->len); */
+
+        pkt = &queue1.queue[queue1.head];
+        write(tunfd, pkt->buf, pkt->len);
+
+        queue1.head = (queue1.head + 1) % PACKET_QUEUE_SIZE;
     }
     return 0;
 }
 
 void *tun_to_queue(void *ptr)
 {
-    int tunFd = (int)ptr;
+    int tunfd = (int)(long)ptr;
+    int nread;
     qpacket *pkt;
 
     while (1) {
-        pkt = malloc(4096 + sizeof(qpacket));
-        read(tunFd, pkt->buf, MTU_SIZE);
-        pkt->len = ntohs(((struct IP_header *)pkt->buf)->LEN);
-        if (pkt->len < 20 || pkt->len > MTU_SIZE) {
+        if (queue_full(&queue2)) {
+            fprintf(stderr, "queue2 full\n");
             continue;
         }
-        if (packet_enqueue(&queue2, pkt) < 0) {
-            fprintf(stderr, "queue2 full\n");
-            free(pkt);
-        }
-        /* fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len); */
+
+        pkt = &queue2.queue[queue2.tail];
+        nread = read(tunfd, pkt->buf, MTU_SIZE);
+        pkt->len = nread;
+
+        queue2.tail = (queue2.tail + 1) % PACKET_QUEUE_SIZE;
     }
     return 0;
 }
@@ -596,18 +571,21 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint64_t prp2 = le64_to_cpu(rw->prp2);
 
     qpacket *node;
-    if (!(node = packet_dequeue(&queue2))) {
+
+    if (queue_empty(&queue2)) {
         return NVME_INVALID_FIELD;
     }
+
+    node = &queue2.queue[queue2.head];
+
     rc = nvme_dma_read_prp(n, (uint8_t *)node->buf, node->len, prp1, prp2);
 
     if (rc != NVME_SUCCESS) {
         fprintf(stderr, "rd: nvme_dma_read failed\n");
         return rc;
     }
-    /* fprintf(stderr, "rd: read %ld bytes\n", node->len); */
-    /* fprintf(stderr, "guest <--- queue2 %ld bytes\n", node->len); */
-    free(node);
+
+    queue2.head = (queue2.head + 1) % PACKET_QUEUE_SIZE;
 
     return rc;
 }
@@ -615,8 +593,6 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
 {
     uint16_t ret;
-    qpacket *buff;
-    unsigned char buf[4096];
     NvmeRwCmd *rw = (NvmeRwCmd *)cmd;
     uint64_t prp1 = le64_to_cpu(rw->prp1);
     uint64_t prp2 = le64_to_cpu(rw->prp2);
@@ -624,40 +600,34 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     uint32_t nlb  = le32_to_cpu(rw->nlb);
     int len;
 
-    memset(buf, 0, sizeof(buf));
+    qpacket *node;
 
-    /* fprintf(stderr, "wr: nvme ip write\n"); */
+    if (queue_full(&queue1)) {
+        fprintf(stderr, "wr: queue full\n");
+        return NVME_INVALID_FIELD;
+    }
+
+    node = &queue1.queue[queue1.tail];
+    memset(node, 0, sizeof(qpacket));
 
     nlb = MTU_SIZE;
-    ret = nvme_dma_write_prp(n, (uint8_t *)buf, nlb, prp1, prp2);
+    ret = nvme_dma_write_prp(n, (uint8_t *)node->buf, nlb, prp1, prp2);
 
     if (ret != NVME_SUCCESS) {
         fprintf(stderr, "wr: nvme dma write failed\n");
         return ret;
     }
 
-    struct ip_hdr *iphdr = (void *)buf;
-    uint32_t addr_buf;
+    struct ip_hdr *iphdr = (void *)node->buf;
 
     len = ntohs(iphdr->len);
     if (len < 20 || len > MTU_SIZE) {
-        fprintf(stderr, "wr: packet length error\n");
-        return NVME_INVALID_FIELD;
+        node->len = 0;
+    } else {
+        node->len = len;
     }
 
-    if (iphdr->version != 4) {
-        fprintf(stderr, "wr: not IPV4\n");
-        return NVME_INVALID_FIELD;
-    }
-
-    buff = malloc(len + sizeof(qpacket));
-    memcpy(buff->buf, buf, len);
-    buff->len = len;
-    if (packet_enqueue(&queue1, buff) < 0) {
-        fprintf(stderr, "wr: queue full\n");
-        return NVME_INVALID_FIELD;
-    }
-    /* fprintf(stderr, "guest ---> queue1 %ld bytes\n", buff->len); */
+    queue1.tail = (queue1.tail + 1) % PACKET_QUEUE_SIZE;
 
     return ret;
 }
@@ -1795,7 +1765,7 @@ static void nvme_class_init(ObjectClass *oc, void *data)
         char addr[16] = "10.0.0.2";
         char netmask[16] = "255.255.255.0";
 
-        uint64_t tunFd = tun_alloc(tun_name, IFF_TUN | IFF_NO_PI);
+        int tunFd = tun_alloc(tun_name, IFF_TUN | IFF_NO_PI);
 
         if (tunFd < 0) {
             fprintf(stderr, "tun alloc failed\n");
@@ -1807,8 +1777,8 @@ static void nvme_class_init(ObjectClass *oc, void *data)
             exit(1);
         }
 
-        pthread_create(&sock_thread, NULL, queue_to_tun, (void *)tunFd);
-        pthread_create(&sock_thread, NULL, tun_to_queue, (void *)tunFd);
+        pthread_create(&sock_thread, NULL, queue_to_tun, (void *)(long)tunFd);
+        pthread_create(&sock_thread, NULL, tun_to_queue, (void *)(long)tunFd);
 
         error_printf("echo start\n");
         if (sock_thread==-1)
