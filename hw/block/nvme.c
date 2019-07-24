@@ -119,7 +119,7 @@ guest <---------------  queue2  <---------------  host
 
 static pthread_t sock_thread = -1;
 
-#define PACKET_QUEUE_SIZE 100
+#define PACKET_QUEUE_SIZE 1000
 
 typedef struct qpacket {
     int64_t len;
@@ -145,8 +145,7 @@ int packet_enqueue(packet_queue *q, qpacket *packet)
 {
     if(q->head == (q->tail + 1) % PACKET_QUEUE_SIZE) {
         return -1; // queue full
-    }
-    else {
+    } else {
         q->queue[(q->tail + 1) % PACKET_QUEUE_SIZE] = packet;
         q->tail = (q->tail + 1) % PACKET_QUEUE_SIZE;
         return 0;
@@ -261,7 +260,7 @@ void *tun_to_queue(void *ptr)
         }
         if (packet_enqueue(&queue2, pkt) < 0) {
             fprintf(stderr, "queue2 full\n");
-	    free(pkt);
+            free(pkt);
         }
         /* fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len); */
     }
