@@ -67,8 +67,6 @@
 /////////////////////////////////////////////////////////////////
 #define MTU_SIZE 1500
 
-#define IP_QSIZE 100
-
 #define IP_ICMP 0x01
 #define IP_TCP 0x06
 #define IP_UDP 0x11
@@ -110,18 +108,18 @@ struct IP_header {
 #pragma pack(pop)
 
 /*
-        nvme_ip_write              toss_cli1
+        nvme_ip_write             queue_to_tun
 guest --------------->  queue1  --------------->  host
 
 
-        nvme_ip_read               toss_cli2
+        nvme_ip_read              tun_to_queue
 guest <---------------  queue2  <---------------  host
 
 */
 
 static pthread_t sock_thread = -1;
 
-#define PACKET_QUEUE_SIZE 1000
+#define PACKET_QUEUE_SIZE 100
 
 typedef struct qpacket {
     int64_t len;
@@ -140,8 +138,8 @@ int packet_enqueue(packet_queue *q, qpacket *packet);
 qpacket *packet_dequeue(packet_queue *q);
 int tun_alloc(char *dev, int flags);
 int ip_addr(const char *if_name, const char *ip_addr, const char *netmask);
-void *toss_cli1(void *ptr);
-void *toss_cli2(void *ptr);
+void *queue_to_tun(void *ptr);
+void *tun_to_queue(void *ptr);
 
 int packet_enqueue(packet_queue *q, qpacket *packet)
 {
@@ -195,7 +193,8 @@ int tun_alloc(char *dev, int flags)
     return fd;
 }
 
-int ip_addr(const char *if_name, const char *ip_addr, const char *netmask) {
+int ip_addr(const char *if_name, const char *ip_addr, const char *netmask)
+{
     struct ifreq ifr;
     struct sockaddr_in *addr = (struct sockaddr_in *)&ifr.ifr_addr;
     int sockfd = socket(PF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -230,7 +229,7 @@ int ip_addr(const char *if_name, const char *ip_addr, const char *netmask) {
     return 0;
 }
 
-void *toss_cli1(void *ptr)
+void *queue_to_tun(void *ptr)
 {
     int tunFd = (int)ptr;
     qpacket *pkt;
@@ -248,7 +247,7 @@ void *toss_cli1(void *ptr)
     return 0;
 }
 
-void *toss_cli2(void *ptr)
+void *tun_to_queue(void *ptr)
 {
     int tunFd = (int)ptr;
     qpacket *pkt;
@@ -258,15 +257,13 @@ void *toss_cli2(void *ptr)
         read(tunFd, pkt->buf, MTU_SIZE);
         pkt->len = ntohs(((struct IP_header *)pkt->buf)->LEN);
         if (pkt->len < 20 || pkt->len > MTU_SIZE) {
-            usleep(10);
             continue;
         }
         if (packet_enqueue(&queue2, pkt) < 0) {
             fprintf(stderr, "queue2 full\n");
-            usleep(100);
+	    free(pkt);
         }
         /* fprintf(stderr, "           queue2 <--- host : %ld bytes\n", pkt->len); */
-        usleep(10);
     }
     return 0;
 }
@@ -1811,8 +1808,8 @@ static void nvme_class_init(ObjectClass *oc, void *data)
             exit(1);
         }
 
-        pthread_create(&sock_thread, NULL, toss_cli1, (void *)tunFd);
-        pthread_create(&sock_thread, NULL, toss_cli2, (void *)tunFd);
+        pthread_create(&sock_thread, NULL, queue_to_tun, (void *)tunFd);
+        pthread_create(&sock_thread, NULL, tun_to_queue, (void *)tunFd);
 
         error_printf("echo start\n");
         if (sock_thread==-1)
