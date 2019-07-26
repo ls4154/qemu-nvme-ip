@@ -57,6 +57,19 @@ typedef struct NvmeNamespace {
 #define NVME(obj) \
         OBJECT_CHECK(NvmeCtrl, (obj), TYPE_NVME)
 
+#define MTU_SIZE 1500
+
+typedef struct qpacket {
+    int64_t len;
+    uint8_t buf[MTU_SIZE];
+} qpacket;
+
+typedef struct packet_queue {
+    uint32_t head;
+    uint32_t tail;
+    qpacket *queue;
+} packet_queue;
+
 typedef struct NvmeCtrl {
     PCIDevice    parent_obj;
     MemoryRegion iomem;
@@ -89,6 +102,16 @@ typedef struct NvmeCtrl {
     NvmeSQueue      admin_sq;
     NvmeCQueue      admin_cq;
     NvmeIdCtrl      id_ctrl;
+
+#define IFNAMSIZ 16
+    char tun_name[IFNAMSIZ];
+    char addr[16];
+    /* char netmask[16]; */
+    int tun_fd;
+    pthread_t th1;
+    pthread_t th2;
+    packet_queue q1;
+    packet_queue q2;
 } NvmeCtrl;
 
 #endif /* HW_NVME_H */
