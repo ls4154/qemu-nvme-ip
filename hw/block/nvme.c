@@ -206,7 +206,12 @@ int if_addr_p2p(const char *if_name, const char *ip_addr)
         return -1;
     }
 
-    inet_pton(AF_INET, "10.0.0.1", &addr->sin_addr);
+int xx, yy, zz;
+sscanf(ip_addr, "10.%d.%d.%d", &xx, &yy, &zz);
+char ss[20];
+sprintf(ss, "10.%d.%d.1", xx, yy);
+
+    inet_pton(AF_INET, ss, &addr->sin_addr);
     if(ioctl(sockfd, SIOCSIFDSTADDR, &ifr) < 0) {
         return -1;
     }
@@ -229,7 +234,7 @@ int ip_nvme_init(NvmeCtrl *obj)
     static nvme_cnt = 0;
 
     sprintf(obj->tun_name, "tun%d", nvme_cnt + 2);
-    sprintf(obj->addr, "10.0.0.%d", nvme_cnt + 2);
+    sprintf(obj->addr, "10.%d.%d.%d", nvme_cnt + 2, nvme_cnt + 2, nvme_cnt + 2);
 
     obj->tun_fd = tun_alloc(obj->tun_name, IFF_TUN | IFF_NO_PI);
     if (obj->tun_fd < 0) {
@@ -250,7 +255,7 @@ int ip_nvme_init(NvmeCtrl *obj)
 
     nvme_cnt++;
 
-    fprintf(stderr, "%s %s\n", obj->tun_name, obj->addr);
+    fprintf(stderr, "%s %s %s\n", obj->parent_obj.name, obj->tun_name, obj->addr);
 
     return 0;
 }
@@ -267,6 +272,7 @@ void *queue_to_tun(void *arg)
             usleep(10);
             continue;
         }
+	fprintf(stderr, "%s %2d: q to tun\n", obj->tun_name, obj->tun_fd);
 
         pkt = &queue1->queue[queue1->head];
         write(tunfd, pkt->buf, pkt->len);
@@ -293,6 +299,7 @@ void *tun_to_queue(void *arg)
         pkt = &queue2->queue[queue2->tail];
         nread = read(tunfd, pkt->buf, MTU_SIZE);
         pkt->len = nread;
+	fprintf(stderr, "%s %2d: tun to q\n", obj->tun_name, obj->tun_fd);
 
         queue2->tail = (queue2->tail + 1) % PACKET_QUEUE_SIZE;
     }
@@ -642,6 +649,7 @@ static uint16_t nvme_ip_read(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         fprintf(stderr, "rd: nvme_dma_read failed\n");
         return rc;
     }
+	fprintf(stderr, "%s %2d: nvme ip rd\n", n->tun_name, n->tun_fd);
 
     queue2->head = (queue2->head + 1) % PACKET_QUEUE_SIZE;
 
@@ -669,6 +677,9 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
     node = &queue1->queue[queue1->tail];
     memset(node, 0, sizeof(qpacket));
 
+
+	fprintf(stderr, "%s %d: nvme ip wr\n", n->tun_name, n->tun_fd);
+
     nlb = MTU_SIZE;
     ret = nvme_dma_write_prp(n, (uint8_t *)node->buf, nlb, prp1, prp2);
 
@@ -676,6 +687,7 @@ static uint16_t nvme_ip_write(NvmeCtrl *n, NvmeNamespace *ns, NvmeCmd *cmd)
         fprintf(stderr, "wr: nvme dma write failed\n");
         return ret;
     }
+
 
     struct ip_hdr *iphdr = (void *)node->buf;
 
