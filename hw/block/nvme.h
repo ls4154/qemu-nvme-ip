@@ -115,3 +115,5 @@ typedef struct NvmeCtrl {
 } NvmeCtrl;
 
 #endif /* HW_NVME_H */
+
+/* vim: set et ts=4 sts=4 sw=4: */

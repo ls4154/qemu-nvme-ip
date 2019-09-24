@@ -1875,3 +1875,5 @@ static void nvme_register_types(void)
 }
 
 type_init(nvme_register_types)
+
+/* vim: set et ts=4 sts=4 sw=4: */
