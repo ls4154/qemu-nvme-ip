@@ -1189,21 +1189,6 @@ static uint16_t nvme_set_feature(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
     return NVME_SUCCESS;
 }
 
-/* static uint16_t checksum(void *addr, int count) */
-/* { */
-/*     uint32_t sum = 0; */
-/*     uint16_t * ptr = addr; */
-/*     while (count > 1)  { */
-/*         sum += * ptr++; */
-/*         count -= 2; */
-/*     } */
-/*     if (count > 0) */
-/*         sum += *(uint8_t *)ptr; */
-/*     while (sum >> 16) */
-/*         sum = (sum & 0xffff) + (sum >> 16); */
-/*     return ~sum; */
-/* } */
-
 static uint16_t nvme_admin_cmd(NvmeCtrl *n, NvmeCmd *cmd, NvmeRequest *req)
 {
     /* fprintf(stderr, "nvme_admin_cmd %x\n", cmd->opcode); */
